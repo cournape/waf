@@ -29,6 +29,9 @@ USELIB_VARS['cprogram'] = USELIB_VARS['cxxprogram'] = set(['LIB', 'STLIB', 'LIBP
 USELIB_VARS['cshlib']   = USELIB_VARS['cxxshlib']   = set(['LIB', 'STLIB', 'LIBPATH', 'STLIBPATH', 'LINKFLAGS', 'RPATH', 'LINKDEPS', 'FRAMEWORK', 'FRAMEWORKPATH', 'ARCH'])
 USELIB_VARS['cstlib']   = USELIB_VARS['cxxstlib']   = set(['ARFLAGS', 'LINKDEPS'])
 
+for _feature in ['cprogram', 'cxxprogram', 'cshlib', 'cxxshlib', 'cstlib', 'cxxstlib']:
+	USELIB_VARS['ordered_linker'] |= USELIB_VARS[_feature]
+
 USELIB_VARS['dprogram'] = set(['LIB', 'STLIB', 'LIBPATH', 'STLIBPATH', 'LINKFLAGS', 'RPATH', 'LINKDEPS'])
 USELIB_VARS['dshlib']   = set(['LIB', 'STLIB', 'LIBPATH', 'STLIBPATH', 'LINKFLAGS', 'RPATH', 'LINKDEPS'])
 USELIB_VARS['dstlib']   = set(['ARFLAGS', 'LINKDEPS'])
@@ -411,6 +414,108 @@ def propagate_uselib_vars(self):
 	for x in self.to_list(getattr(self, 'uselib', [])):
 		for v in _vars:
 			env.append_value(v, env[v + '_' + x])
+
+def colon(env, var1, var2):
+	tmp = env[var1]
+	if isinstance(var2, str):
+		it = env[var2]
+	else:
+		it = var2
+	if isinstance(tmp, str):
+		return [tmp % x for x in it]
+	else:
+		lst = []
+		for y in it:
+			lst.extend(tmp)
+			lst.append(y)
+		return lst
+
+def interpolate_flags(task_gen, line):
+	env = task_gen.env
+	reg_act = Task.reg_act
+
+	extr = []
+	def repl(match):
+		g = match.group
+		if g('dollar'): return "$"
+		elif g('backslash'): return '\\\\'
+		elif g('subst'): extr.append((g('var'), g('code'))); return "%s"
+		return None
+
+	line = reg_act.sub(repl, line) or line
+
+	ret = []
+	for (var, meth) in extr:
+		if meth:
+			if meth.startswith(':'):
+				m = meth[1:]
+				ret.extend(colon(env, var, m))
+			else:
+				raise NotImplementedError()
+				ret.append("%s%s" % (var, meth))
+		else:
+			ret.extend(env[var])
+	return ret
+
+@feature("ordered_linker")
+@before_method("propagate_uselib_vars")
+def apply_ordered_flags(self):
+	link_flag_name_to_template = {
+		"FRAMEWORK": "${FRAMEWORK_ST:%s}",
+		"LIB": "${LIB_ST:%s}",
+		"LINKFLAGS": "${%s}",
+		"STLIB": "${STLIB_ST:%s}"
+    }
+
+	c_flag_name_to_template = {
+		"ARCH": "${ARCH_ST:%s}",
+		"CFLAGS": "${%s}",
+		"CPPFLAGS": "${%s}",
+		"FRAMEWORKPATH": "${FRAMEWORKPATH_ST:%s}",
+		"CPPPATH": "${CPPPATH_ST:%s}",
+		"DEFINES": "${DEFINES_ST:%s}",
+		"INCLUDES": "${CPPPATH_ST:%s}",
+	}
+
+	# FIXME: use correct uselib_vars
+	uselib_vars = set()
+	if "cprogram" in self.features:
+		uselib_vars |= USELIB_VARS["cprogram"]
+	if "cshlib" in self.features:
+		uselib_vars |= USELIB_VARS["cshlib"]
+	if "c" in self.features:
+		uselib_vars |= USELIB_VARS["c"]
+	if "pyext" in self.features:
+		uselib_vars |= USELIB_VARS["pyext"]
+	env = self.env
+
+	uselibs = self.to_list(getattr(self, 'uselib', []))
+	ordered_link = []
+	ordered_c = []
+
+	to_remove = []
+
+	for uselib in uselibs:
+		for uselib_var in uselib_vars:
+			key = uselib_var + '_' + uselib
+			value = env[key]
+			if value:
+				to_remove.append(key)
+				if uselib_var in link_flag_name_to_template:
+					flag_template = link_flag_name_to_template[uselib_var]
+					ordered_link.append(flag_template % key)
+				elif uselib_var in c_flag_name_to_template:
+					flag_template = c_flag_name_to_template[uselib_var]
+					ordered_c.append(flag_template % key)
+				else:
+					raise NotImplementedError(uselib_var)
+	ordered_linkflags = interpolate_flags(self, " ".join(ordered_link))
+	env["ORDERED_LINKFLAGS"] = ordered_linkflags
+	ordered_cflags = interpolate_flags(self, " ".join(ordered_c))
+	env["ORDERED_CFLAGS"] = ordered_cflags
+
+	for key in to_remove:
+		del env[key]
 
 # ============ the code above must not know anything about import libs ==========
 
